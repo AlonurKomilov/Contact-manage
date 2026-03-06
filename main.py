@@ -740,14 +740,19 @@ async def on_google_details(message: Message, state: FSMContext) -> None:
         return
 
     worksheet = lines[1] if len(lines) > 1 else "Sheet1"
+
     try:
-        row_count = await validate_google_source(settings, sheet_id, worksheet)
+        row_count = await validate_google_source(sheet_id, worksheet)
     except Exception as error:
         await _show_prompt(
             message.bot,
             message.chat.id,
             message.from_user.id,
-            f"Не удалось проверить Google Sheet: {error}\n\nПроверьте ссылку, имя листа, доступ сервисного аккаунта и заголовок name,nickname,phone.",
+            f"Не удалось проверить Google Sheet: {error}\n\n"
+            "Убедитесь, что:\n"
+            "• Таблица открыта по ссылке (Все, у кого есть ссылка → Читатель)\n"
+            "• Имя листа указано верно\n"
+            "• Первая строка: name, nickname, phone",
         )
         return
 
@@ -877,7 +882,7 @@ async def on_import(callback: CallbackQuery) -> None:
                 return
 
             source = await _load_ready_source(callback.from_user.id)
-            contacts = await load_contacts(settings, source)
+            contacts = await load_contacts(source)
             manager = await _create_manager(callback.from_user.id)
 
             if source.next_index >= len(contacts):

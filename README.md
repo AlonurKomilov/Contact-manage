@@ -73,15 +73,14 @@ cp .env.example .env
 3. `TG_API_ID` - MTProto API ID от `my.telegram.org`
 4. `TG_API_HASH` - MTProto API HASH от `my.telegram.org`
 5. `SESSION_SECRET` - ключ шифрования для сохраненных Telegram-сессий
-6. `GOOGLE_CREDENTIALS_FILE` - путь до JSON файла сервисного аккаунта Google
-7. `DATABASE_PATH` - путь до SQLite базы
-8. `BATCH_SIZE` - желаемый размер пачки
-9. `MAX_BATCH_SIZE` - жесткий лимит на размер пачки
-10. `SLEEP_BETWEEN_REQUESTS_SEC` - базовая задержка между запросами
-11. `REQUEST_JITTER_SEC` - случайная добавка к задержке
-12. `IMPORT_COOLDOWN_SEC` - пауза между пачками импорта
-13. `DELETE_COOLDOWN_SEC` - пауза между полными удалениями контактов
-14. `LOGIN_CODE_COOLDOWN_SEC` - пауза между запросами кода входа
+6. `DATABASE_PATH` - путь до SQLite базы
+7. `BATCH_SIZE` - желаемый размер пачки
+8. `MAX_BATCH_SIZE` - жесткий лимит на размер пачки
+9. `SLEEP_BETWEEN_REQUESTS_SEC` - базовая задержка между запросами
+10. `REQUEST_JITTER_SEC` - случайная добавка к задержке
+11. `IMPORT_COOLDOWN_SEC` - пауза между пачками импорта
+12. `DELETE_COOLDOWN_SEC` - пауза между полными удалениями контактов
+13. `LOGIN_CODE_COOLDOWN_SEC` - пауза между запросами кода входа
 
 Сгенерировать `SESSION_SECRET` можно так:
 
@@ -91,20 +90,15 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ## Настройка Google Sheets
 
-1. Создайте service account в Google Cloud.
-2. Скачайте JSON ключ.
-3. Положите файл на сервер и укажите путь в `GOOGLE_CREDENTIALS_FILE`.
-4. Откройте доступ к таблице для email сервисного аккаунта.
-5. В боте нажмите кнопку `Set Google Sheet`.
-6. Отправьте либо `sheet_id`, либо полную ссылку на Google Sheets.
-7. При необходимости на второй строке укажите имя листа.
+Сервисный аккаунт Google **не нужен**. Бот читает таблицу напрямую через публичный CSV-экспорт.
 
-Пример:
+1. Откройте Google Sheet → «Настройки доступа» → «Все, у кого есть ссылка» → **Читатель**.
+2. В боте нажмите кнопку «Источник Google».
+3. Отправьте полную ссылку на таблицу, например:
+   `https://docs.google.com/spreadsheets/d/1Abc.../edit?usp=sharing`
+4. При необходимости на второй строке укажите имя листа (по умолчанию `Sheet1`).
 
-```text
-1AbCdEfGhIjKlMnOpQrStUvWxYz
-Sheet1
-```
+Первая строка таблицы должна быть заголовком: `name, nickname, phone`.
 
 ## Настройка Yandex
 

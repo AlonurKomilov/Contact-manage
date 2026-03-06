@@ -1,13 +1,11 @@
-import asyncio
 import csv
 import io
 import re
+import urllib.parse
 from dataclasses import dataclass
 
 import aiohttp
-import gspread
 
-from .config import Settings
 from .storage import SourceConfig
 
 
@@ -83,15 +81,40 @@ def _rows_to_contacts(rows: list[list[str]]) -> list[ContactRow]:
     return contacts
 
 
-def _read_google_rows(settings: Settings, source: SourceConfig) -> list[list[str]]:
-    client = gspread.service_account(filename=settings.google_credentials_file)
-    worksheet = client.open_by_key(source.google_sheet_id).worksheet(source.google_worksheet)
-    values = worksheet.get_all_values()
+async def _read_google_rows(source: SourceConfig) -> list[list[str]]:
+    """Read a public Google Sheet via CSV export (no service account needed).
+
+    The sheet must be shared as 'Anyone with the link can view'.
+    """
+    sheet_name = urllib.parse.quote(source.google_worksheet)
+    url = (
+        f"https://docs.google.com/spreadsheets/d/{source.google_sheet_id}"
+        f"/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    )
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 404:
+                raise ValueError(
+                    "Таблица не найдена. Проверьте ссылку/ID таблицы."
+                )
+            if resp.status in (401, 403):
+                raise ValueError(
+                    "Нет доступа к таблице. Убедитесь, что включен доступ "
+                    "«Все, у кого есть ссылка» → «Читатель»."
+                )
+            if resp.status != 200:
+                raise ValueError(
+                    f"Google вернул ошибку (HTTP {resp.status}). "
+                    "Проверьте ссылку и настройки доступа."
+                )
+            body = await resp.text(encoding="utf-8")
+
+    reader = csv.reader(io.StringIO(body))
+    values = list(reader)
     _validate_contact_header(values)
     if not values:
         return []
-
-    # Assume first row is a header in the user-provided sheet format.
     return values[1:]
 
 
@@ -100,7 +123,7 @@ async def _read_yandex_csv_rows(source: SourceConfig) -> list[list[str]]:
         raise ValueError("Yandex CSV URL is not configured")
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(source.yandex_csv_url, timeout=30) as response:
+        async with session.get(source.yandex_csv_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
             response.raise_for_status()
             body = await response.text(encoding="utf-8")
 
@@ -114,7 +137,6 @@ async def _read_yandex_csv_rows(source: SourceConfig) -> list[list[str]]:
 
 
 async def validate_google_source(
-    settings: Settings,
     google_sheet_id: str,
     worksheet: str,
 ) -> int:
@@ -126,7 +148,7 @@ async def validate_google_source(
         yandex_csv_url="",
         next_index=0,
     )
-    rows = await asyncio.to_thread(_read_google_rows, settings, source)
+    rows = await _read_google_rows(source)
     return len(rows)
 
 
@@ -143,10 +165,10 @@ async def validate_yandex_source(yandex_csv_url: str) -> int:
     return len(rows)
 
 
-async def load_contacts(settings: Settings, source: SourceConfig) -> list[ContactRow]:
+async def load_contacts(source: SourceConfig) -> list[ContactRow]:
     source_name = source.active_source.lower().strip()
     if source_name == "google":
-        rows = await asyncio.to_thread(_read_google_rows, settings, source)
+        rows = await _read_google_rows(source)
     elif source_name == "yandex_csv":
         rows = await _read_yandex_csv_rows(source)
     else:

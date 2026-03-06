@@ -9,7 +9,6 @@ class Settings:
     bot_owner_id: int
     tg_api_id: int
     tg_api_hash: str
-    google_credentials_file: str
     batch_size: int
     max_batch_size: int
     sleep_between_requests_sec: float
@@ -45,9 +44,6 @@ def load_settings() -> Settings:
         bot_owner_id=_as_int("BOT_OWNER_ID", 0),
         tg_api_id=_as_int("TG_API_ID"),
         tg_api_hash=os.getenv("TG_API_HASH", ""),
-        google_credentials_file=os.getenv(
-            "GOOGLE_CREDENTIALS_FILE", "google-service-account.json"
-        ),
         batch_size=_as_int("BATCH_SIZE", 200),
         max_batch_size=_as_int("MAX_BATCH_SIZE", 200),
         sleep_between_requests_sec=_as_float("SLEEP_BETWEEN_REQUESTS_SEC", 1.5),
