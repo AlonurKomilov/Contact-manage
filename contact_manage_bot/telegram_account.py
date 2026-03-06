@@ -26,6 +26,7 @@ class BatchResult:
     imported: int
     failed: int
     skipped: int
+    imported_user_ids: list[tuple[int, str, str, str]]  # (tg_user_id, first_name, phone, username)
 
 
 @dataclass
@@ -197,22 +198,28 @@ class TelegramContactManager:
     async def disconnect(self) -> None:
         await self._client.disconnect()
 
-    async def _import_by_phone(self, contact: ContactRow) -> bool:
+    async def _import_by_phone(self, contact: ContactRow) -> int | None:
+        """Returns the telegram user id if contact was imported, or None."""
         input_contact = types.InputPhoneContact(
             client_id=random.randint(1, 2_147_483_647),
             phone=contact.phone,
             first_name=contact.first_name or "Unknown",
             last_name="",
         )
-        await self._client(functions.contacts.ImportContactsRequest([input_contact]))
-        return True
+        result = await self._client(functions.contacts.ImportContactsRequest([input_contact]))
+        if result.imported:
+            return result.imported[0].user_id
+        if result.users:
+            return result.users[0].id
+        return None
 
-    async def _import_by_username(self, contact: ContactRow) -> bool:
+    async def _import_by_username(self, contact: ContactRow) -> int | None:
+        """Returns the telegram user id if contact was added, or None."""
         resolved = await self._client(
             functions.contacts.ResolveUsernameRequest(contact.username)
         )
         if not resolved.users:
-            return False
+            return None
 
         user = resolved.users[0]
         first_name = contact.first_name or user.first_name or "Unknown"
@@ -227,7 +234,7 @@ class TelegramContactManager:
                 add_phone_privacy_exception=False,
             )
         )
-        return True
+        return user.id
 
     async def import_batch(
         self,
@@ -241,19 +248,23 @@ class TelegramContactManager:
         imported = 0
         failed = 0
         skipped = 0
+        imported_user_ids: list[tuple[int, str, str, str]] = []
 
         for contact in chunk:
             while True:
                 try:
                     if contact.phone:
-                        ok = await self._import_by_phone(contact)
+                        uid = await self._import_by_phone(contact)
                     elif contact.username:
-                        ok = await self._import_by_username(contact)
+                        uid = await self._import_by_username(contact)
                     else:
-                        ok = False
+                        uid = None
 
-                    if ok:
+                    if uid is not None:
                         imported += 1
+                        imported_user_ids.append(
+                            (uid, contact.first_name, contact.phone, contact.username)
+                        )
                     else:
                         skipped += 1
                     break
@@ -276,12 +287,46 @@ class TelegramContactManager:
             imported=imported,
             failed=failed,
             skipped=skipped,
+            imported_user_ids=imported_user_ids,
         )
 
-    async def delete_all_contacts(self) -> int:
-        contacts = await self._client.get_contacts()
-        if not contacts:
-            return 0
+    async def get_contacts(self) -> list[types.User]:
+        """Fetch all contacts from the Telegram account."""
+        result = await self._client(functions.contacts.GetContactsRequest(hash=0))
+        if hasattr(result, 'users'):
+            return result.users
+        return []
 
-        await self._client.delete_contacts(contacts)
-        return len(contacts)
+    async def delete_contacts_by_ids(self, user_ids: set[int]) -> int:
+        """Delete only the contacts whose Telegram user IDs are in user_ids."""
+        all_contacts = await self.get_contacts()
+        to_delete = [
+            types.InputUser(user_id=u.id, access_hash=u.access_hash)
+            for u in all_contacts
+            if u.id in user_ids
+        ]
+        if not to_delete:
+            return 0
+        # Telegram accepts up to 100 per request
+        deleted = 0
+        for i in range(0, len(to_delete), 100):
+            batch = to_delete[i : i + 100]
+            await self._client(functions.contacts.DeleteContactsRequest(id=batch))
+            deleted += len(batch)
+        return deleted
+
+    async def delete_all_contacts(self) -> int:
+        """Delete ALL contacts (legacy fallback)."""
+        all_contacts = await self.get_contacts()
+        if not all_contacts:
+            return 0
+        to_delete = [
+            types.InputUser(user_id=u.id, access_hash=u.access_hash)
+            for u in all_contacts
+        ]
+        deleted = 0
+        for i in range(0, len(to_delete), 100):
+            batch = to_delete[i : i + 100]
+            await self._client(functions.contacts.DeleteContactsRequest(id=batch))
+            deleted += len(batch)
+        return deleted

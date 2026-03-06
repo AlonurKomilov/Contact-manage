@@ -77,8 +77,9 @@ def _main_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📥 Импорт следующих 200", callback_data="import_200")],
             [
                 InlineKeyboardButton(text="🔄 Сбросить прогресс", callback_data="reset_progress"),
-                InlineKeyboardButton(text="🗑 Удалить контакты", callback_data="delete_all_contacts"),
+                InlineKeyboardButton(text="🗑 Удалить импорт", callback_data="delete_imported_contacts"),
             ],
+            [InlineKeyboardButton(text="💾 Бэкап контактов", callback_data="backup_contacts")],
             # --- Прочее ---
             [
                 InlineKeyboardButton(text="🔃 Обновить", callback_data="refresh_status"),
@@ -158,6 +159,7 @@ async def _build_status(viewer: User) -> str:
     account = await storage.get_account(user_id)
     source = await storage.get_source(user_id)
     pending = await storage.get_pending_auth(user_id)
+    imported_count = await storage.get_imported_contacts_count(user_id)
 
     viewer_status = _format_viewer(viewer)
 
@@ -191,7 +193,8 @@ async def _build_status(viewer: User) -> str:
         f"📂 Источник: {active_source}\n"
         f"   Google: {google_status} / {source.google_worksheet}\n"
         f"   Yandex: {yandex_status}\n\n"
-        f"📥 Импортировано до индекса: {source.next_index}"
+        f"📥 Импортировано до индекса: {source.next_index}\n"
+        f"📇 Контактов добавлено ботом: {imported_count}"
     )
 
 
@@ -921,6 +924,22 @@ async def on_import(callback: CallbackQuery) -> None:
             await storage.log_action(callback.from_user.id, "import_batch", result.processed)
             await storage.log_action(callback.from_user.id, "import_contact", result.processed)
 
+            # Save imported contact IDs for safe deletion later
+            if result.imported_user_ids:
+                await storage.add_imported_contacts_bulk(
+                    callback.from_user.id, result.imported_user_ids,
+                )
+
+            # Verify real contacts on Telegram account
+            try:
+                tg_contacts = await manager.get_contacts()
+                tg_count = len(tg_contacts)
+            except Exception:
+                tg_count = None
+
+            total_csv = len(contacts)
+            imported_db = await storage.get_imported_contacts_count(callback.from_user.id)
+
             notice = (
                 "Импорт завершен.\n"
                 f"Стартовый индекс: {result.start_index}\n"
@@ -928,8 +947,13 @@ async def on_import(callback: CallbackQuery) -> None:
                 f"Импортировано: {result.imported}\n"
                 f"Ошибок: {result.failed}\n"
                 f"Пропущено: {result.skipped}\n"
-                f"Следующий индекс: {result.next_index}"
+                f"Следующий индекс: {result.next_index}\n\n"
+                f"📊 Статистика:\n"
+                f"Строк в CSV/таблице: {total_csv}\n"
+                f"Добавлено ботом (всего): {imported_db}"
             )
+            if tg_count is not None:
+                notice += f"\nКонтактов в Telegram: {tg_count}"
             await _show_dashboard(
                 callback.bot,
                 callback.message.chat.id,
@@ -950,7 +974,8 @@ async def on_import(callback: CallbackQuery) -> None:
                 await manager.disconnect()
 
 
-async def on_delete_all(callback: CallbackQuery) -> None:
+async def on_delete_imported(callback: CallbackQuery) -> None:
+    """Delete only contacts that were imported by this bot (safe delete)."""
     if not await _ensure_access(callback.from_user.id, callback):
         return
 
@@ -979,8 +1004,19 @@ async def on_delete_all(callback: CallbackQuery) -> None:
                     callback.from_user,
                     preferred_message_id=callback.message.message_id,
                     notice=(
-                        f"Сейчас действует пауза между удалениями. Подождите {cooldown_left} сек. перед повторным удалением контактов."
+                        f"Сейчас действует пауза между удалениями. Подождите {cooldown_left} сек."
                     ),
+                )
+                return
+
+            imported_ids = await storage.get_imported_contact_ids(callback.from_user.id)
+            if not imported_ids:
+                await _show_dashboard(
+                    callback.bot,
+                    callback.message.chat.id,
+                    callback.from_user,
+                    preferred_message_id=callback.message.message_id,
+                    notice="Нет импортированных ботом контактов для удаления.",
                 )
                 return
 
@@ -989,17 +1025,22 @@ async def on_delete_all(callback: CallbackQuery) -> None:
                 callback.bot,
                 callback.message.chat.id,
                 callback.from_user.id,
-                "Удаляю Telegram-контакты из облака...",
+                f"Удаляю {len(imported_ids)} контактов, добавленных ботом...\n"
+                "Ваши личные контакты не будут затронуты.",
                 preferred_message_id=callback.message.message_id,
             )
-            deleted_count = await manager.delete_all_contacts()
+            deleted_count = await manager.delete_contacts_by_ids(imported_ids)
+            await storage.clear_imported_contacts(callback.from_user.id)
             await storage.log_action(callback.from_user.id, "delete_contacts", deleted_count)
             await _show_dashboard(
                 callback.bot,
                 callback.message.chat.id,
                 callback.from_user,
                 preferred_message_id=callback.message.message_id,
-                notice=f"Удалено контактов: {deleted_count}",
+                notice=(
+                    f"Удалено контактов (добавленных ботом): {deleted_count}\n"
+                    "Ваши личные контакты не затронуты."
+                ),
             )
         except Exception as error:
             await _show_dashboard(
@@ -1008,6 +1049,79 @@ async def on_delete_all(callback: CallbackQuery) -> None:
                 callback.from_user,
                 preferred_message_id=callback.message.message_id,
                 notice=f"Не удалось удалить контакты: {error}",
+            )
+        finally:
+            if manager is not None:
+                await manager.disconnect()
+
+
+async def on_backup_contacts(callback: CallbackQuery) -> None:
+    """Download a CSV backup of all contacts currently in the Telegram account."""
+    if not await _ensure_access(callback.from_user.id, callback):
+        return
+
+    lock = _get_user_lock(callback.from_user.id)
+    if lock.locked():
+        await callback.answer("Сейчас уже выполняется другая операция", show_alert=True)
+        return
+
+    async with lock:
+        await callback.answer()
+        manager: TelegramContactManager | None = None
+        try:
+            manager = await _create_manager(callback.from_user.id)
+            tg_contacts = await manager.get_contacts()
+
+            if not tg_contacts:
+                await _show_dashboard(
+                    callback.bot,
+                    callback.message.chat.id,
+                    callback.from_user,
+                    preferred_message_id=callback.message.message_id,
+                    notice="В аккаунте нет контактов для бэкапа.",
+                )
+                return
+
+            buf = io.StringIO(newline="")
+            buf.write("name,nickname,phone\r\n")
+            for user in tg_contacts:
+                first = (user.first_name or "").replace(",", " ")
+                last = (user.last_name or "").replace(",", " ")
+                name = f"{first} {last}".strip() if last else first
+                username = user.username or ""
+                phone = f"+{user.phone}" if user.phone else ""
+                buf.write(f"{name},{username},{phone}\r\n")
+
+            file = BufferedInputFile(
+                file=buf.getvalue().encode("utf-8-sig"),
+                filename="contacts_backup.csv",
+            )
+
+            # Send backup file to user, then show dashboard
+            old_msg_id = window_messages.get(callback.from_user.id, (0, 0))[1]
+            if old_msg_id:
+                await _safe_delete_message(callback.bot, callback.message.chat.id, old_msg_id)
+                window_messages.pop(callback.from_user.id, None)
+
+            await callback.bot.send_document(
+                chat_id=callback.message.chat.id,
+                document=file,
+                caption=f"Бэкап контактов Telegram ({len(tg_contacts)} шт.)\n"
+                        "Если потребуется восстановить — импортируйте этот файл обратно.",
+            )
+            await _show_dashboard(
+                callback.bot,
+                callback.message.chat.id,
+                callback.from_user,
+                notice=f"Бэкап создан: {len(tg_contacts)} контактов сохранено в CSV.",
+            )
+        except Exception as error:
+            await _show_dashboard(
+                callback.bot,
+                callback.message.chat.id,
+                callback.from_user,
+                preferred_message_id=callback.message.message_id,
+                notice=f"Не удалось создать бэкап: {error}",
             )
         finally:
             if manager is not None:
@@ -1059,7 +1173,8 @@ async def main() -> None:
     dispatcher.callback_query.register(on_show_examples, F.data == "show_examples")
     dispatcher.callback_query.register(on_import, F.data == "import_200")
     dispatcher.callback_query.register(on_reset_progress, F.data == "reset_progress")
-    dispatcher.callback_query.register(on_delete_all, F.data == "delete_all_contacts")
+    dispatcher.callback_query.register(on_delete_imported, F.data == "delete_imported_contacts")
+    dispatcher.callback_query.register(on_backup_contacts, F.data == "backup_contacts")
     dispatcher.callback_query.register(on_refresh, F.data == "refresh_status")
     dispatcher.callback_query.register(on_cancel_callback, F.data == "cancel_step")
     dispatcher.callback_query.register(on_cancel_callback, F.data == "back_main")

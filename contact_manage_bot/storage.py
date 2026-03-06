@@ -101,6 +101,19 @@ class Storage:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS imported_contacts (
+                    owner_user_id INTEGER NOT NULL,
+                    telegram_user_id INTEGER NOT NULL,
+                    first_name TEXT NOT NULL DEFAULT '',
+                    phone TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (owner_user_id, telegram_user_id)
+                )
+                """
+            )
 
     async def get_account(self, owner_user_id: int) -> TelegramAccount | None:
         return await asyncio.to_thread(self._get_account_sync, owner_user_id)
@@ -429,3 +442,110 @@ class Storage:
                 else None
             ),
         )
+
+    # ── imported contacts tracking ──
+
+    async def add_imported_contact(
+        self,
+        owner_user_id: int,
+        telegram_user_id: int,
+        first_name: str = "",
+        phone: str = "",
+        username: str = "",
+    ) -> None:
+        await asyncio.to_thread(
+            self._add_imported_contact_sync,
+            owner_user_id, telegram_user_id, first_name, phone, username,
+        )
+
+    def _add_imported_contact_sync(
+        self,
+        owner_user_id: int,
+        telegram_user_id: int,
+        first_name: str,
+        phone: str,
+        username: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO imported_contacts
+                    (owner_user_id, telegram_user_id, first_name, phone, username)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(owner_user_id, telegram_user_id) DO UPDATE SET
+                    first_name = excluded.first_name,
+                    phone = excluded.phone,
+                    username = excluded.username,
+                    imported_at = CURRENT_TIMESTAMP
+                """,
+                (owner_user_id, telegram_user_id, first_name, phone, username),
+            )
+
+    async def add_imported_contacts_bulk(
+        self,
+        owner_user_id: int,
+        entries: list[tuple[int, str, str, str]],
+    ) -> None:
+        """Bulk insert (telegram_user_id, first_name, phone, username) tuples."""
+        await asyncio.to_thread(
+            self._add_imported_contacts_bulk_sync, owner_user_id, entries,
+        )
+
+    def _add_imported_contacts_bulk_sync(
+        self,
+        owner_user_id: int,
+        entries: list[tuple[int, str, str, str]],
+    ) -> None:
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO imported_contacts
+                    (owner_user_id, telegram_user_id, first_name, phone, username)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(owner_user_id, telegram_user_id) DO UPDATE SET
+                    first_name = excluded.first_name,
+                    phone = excluded.phone,
+                    username = excluded.username,
+                    imported_at = CURRENT_TIMESTAMP
+                """,
+                [(owner_user_id, tid, fn, ph, un) for tid, fn, ph, un in entries],
+            )
+
+    async def get_imported_contact_ids(self, owner_user_id: int) -> set[int]:
+        return await asyncio.to_thread(
+            self._get_imported_contact_ids_sync, owner_user_id,
+        )
+
+    def _get_imported_contact_ids_sync(self, owner_user_id: int) -> set[int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT telegram_user_id FROM imported_contacts WHERE owner_user_id = ?",
+                (owner_user_id,),
+            ).fetchall()
+        return {row["telegram_user_id"] for row in rows}
+
+    async def get_imported_contacts_count(self, owner_user_id: int) -> int:
+        return await asyncio.to_thread(
+            self._get_imported_contacts_count_sync, owner_user_id,
+        )
+
+    def _get_imported_contacts_count_sync(self, owner_user_id: int) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS cnt FROM imported_contacts WHERE owner_user_id = ?",
+                (owner_user_id,),
+            ).fetchone()
+        return int(row["cnt"] or 0)
+
+    async def clear_imported_contacts(self, owner_user_id: int) -> int:
+        return await asyncio.to_thread(
+            self._clear_imported_contacts_sync, owner_user_id,
+        )
+
+    def _clear_imported_contacts_sync(self, owner_user_id: int) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM imported_contacts WHERE owner_user_id = ?",
+                (owner_user_id,),
+            )
+        return cursor.rowcount
